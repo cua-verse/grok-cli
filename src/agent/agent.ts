@@ -2587,7 +2587,35 @@ function toToolResult(output: unknown): ToolResult {
       lspDiagnostics: r.lspDiagnostics,
     };
   }
-  return { success: true, output: String(output) };
+
+  // MCP CallToolResult: {content: [{type, text?, data?, mimeType?}], isError?}
+  if (output && typeof output === "object" && "content" in output) {
+    const mcp = output as { content?: unknown[]; isError?: boolean };
+    if (Array.isArray(mcp.content)) {
+      const textParts: string[] = [];
+      for (const part of mcp.content) {
+        if (part && typeof part === "object") {
+          const p = part as Record<string, unknown>;
+          if (p.type === "text" && typeof p.text === "string") {
+            textParts.push(p.text);
+          } else if (p.type === "image" && typeof p.data === "string") {
+            textParts.push("[image]");
+          } else if (p.type === "resource" && p.resource && typeof p.resource === "object") {
+            const res = p.resource as Record<string, unknown>;
+            textParts.push(typeof res.text === "string" ? res.text : JSON.stringify(res));
+          }
+        }
+      }
+      return {
+        success: !mcp.isError,
+        output: textParts.join("\n") || JSON.stringify(mcp.content),
+        error: mcp.isError ? textParts.join("\n") : undefined,
+      };
+    }
+  }
+
+  if (typeof output === "string") return { success: true, output };
+  return { success: true, output: JSON.stringify(output) };
 }
 
 function formatSubagentActivity(toolName: string, args?: unknown): string {
