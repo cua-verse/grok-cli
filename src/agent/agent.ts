@@ -13,7 +13,13 @@ import {
   getBatchChatCompletion,
   pollBatchRequestResult,
 } from "../grok/batch";
-import { createProvider, generateTitle as genTitle, resolveModelRuntime, type XaiProvider } from "../grok/client";
+import {
+  createProvider,
+  generateTitle as genTitle,
+  isCustomBaseURL,
+  resolveModelRuntime,
+  type XaiProvider,
+} from "../grok/client";
 import { DEFAULT_MODEL, getModelInfo, normalizeModelId } from "../grok/models";
 import { toolSetToBatchTools } from "../grok/tool-schemas";
 import { createTools } from "../grok/tools";
@@ -566,7 +572,8 @@ export class Agent {
     this.delegations = new DelegationManager(() => this.bash.getCwd());
 
     const initialMode: AgentMode = "agent";
-    this.modelId = normalizeModelId(model || getCurrentModel(initialMode));
+    const rawModel = model || getCurrentModel(initialMode);
+    this.modelId = isCustomBaseURL(baseURL) ? rawModel : normalizeModelId(rawModel);
     this.schedules = new ScheduleManager(
       () => this.bash.getCwd(),
       () => this.modelId,
@@ -593,7 +600,7 @@ export class Agent {
   }
 
   setModel(model: string): void {
-    this.modelId = normalizeModelId(model);
+    this.modelId = isCustomBaseURL(this.baseURL ?? undefined) ? model : normalizeModelId(model);
     if (this.sessionStore && this.session) {
       this.sessionStore.setModel(this.session.id, this.modelId);
       this.session = this.sessionStore.getRequiredSession(this.session.id);
@@ -625,7 +632,7 @@ export class Agent {
       this.mode = mode;
       const modeModel = getModeSpecificModel(mode);
       if (modeModel) {
-        this.modelId = normalizeModelId(modeModel);
+        this.modelId = isCustomBaseURL(this.baseURL ?? undefined) ? modeModel : normalizeModelId(modeModel);
       }
       if (this.sessionStore && this.session) {
         this.sessionStore.setMode(this.session.id, mode);
