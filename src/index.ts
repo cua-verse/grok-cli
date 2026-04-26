@@ -4,6 +4,7 @@ import * as dotenv from "dotenv";
 import packageJson from "../package.json";
 import { Agent } from "./agent/agent";
 import { completeDelegation, failDelegation, loadDelegation } from "./agent/delegations";
+import { isCustomBaseURL } from "./grok/client";
 import { MODELS, normalizeModelId } from "./grok/models";
 import {
   createHeadlessJsonlEmitter,
@@ -191,7 +192,11 @@ async function runBackgroundDelegation(jobPath: string, options: CliOptions) {
 
     const baseURL = stringOption(options.baseUrl) || getBaseURL();
     const explicitModel = stringOption(options.model) || delegation.model;
-    const model = explicitModel ? normalizeModelId(explicitModel) : undefined;
+    const model = explicitModel
+      ? isCustomBaseURL(baseURL)
+        ? explicitModel
+        : normalizeModelId(explicitModel)
+      : undefined;
     const maxToolRounds =
       parseInt(stringOption(options.maxToolRounds) || String(delegation.maxToolRounds), 10) || delegation.maxToolRounds;
     const sandboxMode = resolveCliSandboxMode(options.sandbox) || delegation.sandboxMode || getCurrentSandboxMode();
@@ -233,7 +238,11 @@ function resolveConfig(options: CliOptions) {
   const apiKey = stringOption(options.apiKey) || getApiKey();
   const baseURL = stringOption(options.baseUrl) || getBaseURL();
   const explicitModel = stringOption(options.model);
-  const model = explicitModel ? normalizeModelId(explicitModel) : undefined;
+  const model = explicitModel
+    ? isCustomBaseURL(baseURL)
+      ? explicitModel
+      : normalizeModelId(explicitModel)
+    : undefined;
   const maxToolRounds = parseInt(stringOption(options.maxToolRounds) || "400", 10) || 400;
   const sandboxMode = resolveCliSandboxMode(options.sandbox) || getCurrentSandboxMode();
 
