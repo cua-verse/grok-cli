@@ -172,6 +172,7 @@ export interface UserSettings {
   hooks?: HooksConfig;
   payments?: PaymentSettings;
   modeModels?: Partial<Record<AgentMode, string>>;
+  disabledTools?: string[];
 }
 
 export interface ProjectSettings {

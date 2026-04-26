@@ -22,7 +22,7 @@ import { editFile, readFile, writeFile } from "../tools/file";
 import { executeGrep } from "../tools/grep";
 import type { ScheduleDaemonStatus, ScheduleManager, StoredSchedule } from "../tools/schedule";
 import type { AgentMode, TaskRequest, ToolResult } from "../types/index";
-import { type CustomSubagentConfig, loadPaymentSettings, loadValidSubAgents } from "../utils/settings";
+import { type CustomSubagentConfig, loadPaymentSettings, loadUserSettings, loadValidSubAgents } from "../utils/settings";
 import type { XaiProvider } from "./client";
 import {
   type GenerateImageToolInput,
@@ -920,7 +920,7 @@ export function createTools(
     },
   });
 
-  if (mode !== "plan") return tools;
+  if (mode !== "plan") return filterDisabledTools(tools);
 
   tools.generate_plan = tool({
     description:
@@ -969,6 +969,16 @@ export function createTools(
     },
   });
 
+  return filterDisabledTools(tools);
+}
+
+function filterDisabledTools(tools: ToolSet): ToolSet {
+  const disabled = loadUserSettings().disabledTools;
+  if (!disabled?.length) return tools;
+  const blocked = new Set(disabled);
+  for (const name of Object.keys(tools)) {
+    if (blocked.has(name)) delete tools[name];
+  }
   return tools;
 }
 
