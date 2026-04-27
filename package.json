@@ -81,5 +81,8 @@
   "engines": {
     "node": ">=18.0.0"
   },
-  "preferGlobal": true
+  "preferGlobal": true,
+  "optionalDependencies": {
+    "@opentui/core-win32-x64": "^0.1.105"
+  }
 }

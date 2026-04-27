@@ -1,6 +1,7 @@
 import { createOpenAI, type OpenAIProvider } from "@ai-sdk/openai";
+import type { LanguageModelV3CallOptions, LanguageModelV3Message, LanguageModelV3Middleware } from "@ai-sdk/provider";
 import { createXai } from "@ai-sdk/xai";
-import { generateText } from "ai";
+import { generateText, wrapLanguageModel } from "ai";
 import type { ModelInfo, ReasoningEffort } from "../types/index";
 import { getReasoningEffortForModel } from "../utils/settings";
 import { getEffectiveReasoningEffort, getModelInfo, normalizeModelId } from "./models";
@@ -66,15 +67,124 @@ export function createProvider(apiKey: string, baseURL?: string): XaiProvider {
   });
 }
 
+// ---------------------------------------------------------------------------
+// OpenRouter adaptation: reverse-map OpenRouter model IDs to native IDs so
+// that modelInfo (context window, capabilities) is available even when using
+// a custom base URL.  Only dots-to-dashes in version numbers are converted;
+// normalizeModelId() handles prefix stripping and alias lookup.
+// ---------------------------------------------------------------------------
+function resolveModelInfoForCustomURL(openRouterModelId: string): ModelInfo | undefined {
+  const direct = getModelInfo(openRouterModelId);
+  if (direct) return direct;
+
+  const bare = openRouterModelId.replace(/^(x-ai|xai)\//i, "");
+  // OpenRouter uses dots in versions (4.1) where native uses dashes (4-1).
+  const dashed = bare.replace(/(\d+)\.(\d+)/g, "$1-$2");
+  return getModelInfo(dashed) || getModelInfo(bare);
+}
+
+// ---------------------------------------------------------------------------
+// OpenRouter adaptation: middleware that extracts images from MCP tool results
+// and re-injects them as user messages so the model receives proper vision
+// content instead of JSON-stringified base64 text.
+//
+// xAI/OpenRouter counts data-URL base64 as text tokens, so a single 1080p
+// screenshot can cost 100-300K tokens per step if left in conversation
+// history.  To avoid blowing the context window:
+//   1. ALWAYS replace image data in tool results with a text placeholder
+//      (prevents JSON-stringify of base64 in tool messages).
+//   2. Only inject the actual image as a user message for the LATEST
+//      un-responded-to tool results (the model sees it once).
+//   3. For older tool results the model has already responded to, just
+//      keep the "[screenshot]" placeholder — the model's earlier response
+//      already captured what it saw.
+// ---------------------------------------------------------------------------
+function injectImagesFromToolResults(prompt: LanguageModelV3Message[]): LanguageModelV3Message[] {
+  // Find the index of the last assistant message — tool results after it
+  // are "pending" (model hasn't responded yet).
+  let lastAssistantIdx = -1;
+  for (let i = prompt.length - 1; i >= 0; i--) {
+    if (prompt[i].role === "assistant") {
+      lastAssistantIdx = i;
+      break;
+    }
+  }
+
+  const out: LanguageModelV3Message[] = [];
+  let modified = false;
+
+  for (let i = 0; i < prompt.length; i++) {
+    const msg = prompt[i];
+    if (msg.role !== "tool") {
+      out.push(msg);
+      continue;
+    }
+
+    const isPending = i > lastAssistantIdx;
+    const imageParts: Array<{ data: string; mediaType: string }> = [];
+    const rewrittenContent = msg.content.map((part) => {
+      if (part.type !== "tool-result") return part;
+      const output = part.output;
+      if (!output || output.type !== "content" || !Array.isArray(output.value)) return part;
+
+      const hasImage = output.value.some((v: { type: string }) => v.type === "image-data" || v.type === "file-data");
+      if (!hasImage) return part;
+
+      modified = true;
+      const keptValues: typeof output.value = [];
+      for (const item of output.value) {
+        if ((item.type === "image-data" || item.type === "file-data") && item.mediaType?.startsWith("image/")) {
+          if (isPending) {
+            imageParts.push({ data: item.data, mediaType: item.mediaType });
+          }
+          keptValues.push({ type: "text" as const, text: "[screenshot]" });
+        } else {
+          keptValues.push(item);
+        }
+      }
+      return { ...part, output: { ...output, value: keptValues } };
+    });
+
+    out.push({ ...msg, content: rewrittenContent } as typeof msg);
+
+    if (imageParts.length > 0) {
+      out.push({
+        role: "user" as const,
+        content: [
+          ...imageParts.map((img) => ({
+            type: "file" as const,
+            data: img.data,
+            mediaType: img.mediaType,
+          })),
+          { type: "text" as const, text: "Above is the screenshot from the tool call." },
+        ],
+      });
+    }
+  }
+
+  return modified ? out : prompt;
+}
+
+const imageInjectionMiddleware: LanguageModelV3Middleware = {
+  specificationVersion: "v3",
+  transformParams: async ({ params }: { params: LanguageModelV3CallOptions }) => ({
+    ...params,
+    prompt: injectImagesFromToolResults(params.prompt),
+  }),
+};
+
 export function resolveModelRuntime(provider: XaiProvider, requestedModelId: string): ResolvedModelRuntime {
   const customURL = isCustomBaseURL();
-  // Skip model normalization for custom endpoints: pass the model ID
-  // through as-is so provider-prefixed names like "x-ai/grok-4.1-fast"
-  // reach the API unchanged.
   const modelId = customURL ? requestedModelId : normalizeModelId(requestedModelId);
-  const modelInfo = customURL ? undefined : getModelInfo(modelId);
+
+  // For custom endpoints, reverse-map the OpenRouter model ID to find native
+  // modelInfo (enables context compaction, capability detection, etc.).
+  const modelInfo = customURL ? resolveModelInfoForCustomURL(requestedModelId) : getModelInfo(modelId);
+  const nativeId = modelInfo?.id;
   const reasoningEffort = customURL
-    ? undefined
+    ? nativeId
+      ? getEffectiveReasoningEffort(nativeId, getReasoningEffortForModel(nativeId))
+      : undefined
     : getEffectiveReasoningEffort(modelId, getReasoningEffortForModel(modelId));
 
   let model: GrokRuntimeModel;
@@ -82,7 +192,13 @@ export function resolveModelRuntime(provider: XaiProvider, requestedModelId: str
     // Force Chat Completions API for custom endpoints (OpenRouter, etc.).
     // @ai-sdk/openai v3 defaults to the Responses API which most
     // third-party endpoints don't support.
-    model = (_openaiProvider as OpenAIProvider).chat(modelId);
+    const baseModel = (_openaiProvider as OpenAIProvider).chat(modelId);
+    // Wrap with image-injection middleware so MCP screenshot results reach the
+    // model as proper vision content rather than JSON-stringified base64.
+    model = wrapLanguageModel({
+      model: baseModel,
+      middleware: imageInjectionMiddleware,
+    }) as unknown as GrokRuntimeModel;
   } else if (modelInfo?.responsesOnly) {
     model = provider.responses(modelId);
   } else {
