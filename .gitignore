@@ -115,3 +115,5 @@ skills-lock.json
 # Secrets / credentials
 telegram-pair-code.txt
 .bun-build
+.bun-build
+*.bun-build
